@@ -1,5 +1,5 @@
---Proyecto Final SGBD Hospital
---Script 01: Estrucutura
+--Proyecto final Bases de Datos: SGBD Hospital
+--Script 01: estructura de la base de datos (SQL Server)
 
 CREATE DATABASE HospitalDB;
 GO
@@ -15,7 +15,7 @@ rol VARCHAR(15) NOT NULL,
 activo BIT NOT NULL DEFAULT 1,
 fecha_alta DATETIME NOT NULL DEFAULT GETDATE(),
 CONSTRAINT UQ_USUARIO_username UNIQUE (username),
-CONSTRAINT CK_USUARIO_rol CHECK (rol IN ('Admin','Recepcionista','Doctor','Paciente','Cajero','Farmaceutico')),
+CONSTRAINT CK_USUARIO_rol CHECK (rol IN ('Admin','Recepcionista','Doctor','Paciente','Farmaceutico')),
 CONSTRAINT CK_USUARIO_contrasena CHECK (LEN(contrasena) >= 8)
 );
 GO
@@ -40,7 +40,7 @@ CONSTRAINT CK_CONSULTORIO_piso CHECK (piso >= 0)
 );
 GO
 
---Empleados (recepcionistas, doctores, cajeros, farmaceuticos)
+--Empleados (recepcionista, farmaceutico y doctores)
 CREATE TABLE EMPLEADO (
 num_empleado INT IDENTITY(1,1) PRIMARY KEY,
 id_usuario INT NOT NULL,
