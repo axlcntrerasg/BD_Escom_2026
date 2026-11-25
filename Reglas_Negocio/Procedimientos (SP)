@@ -1,1 +1,755 @@
+--Proyecto final Bases de Datos: SGBD Hospital
+--Script 05: procedimientos almacenados
+--Ejecutar despues del script 04 (triggers)
+--Si algo no cumple una regla, el SP marca error con RAISERROR y no guarda nada;
+--Flask recibe ese mensaje y lo muestra en pantalla
 
+USE HospitalDB;
+GO
+
+/* =========================================================
+LOGIN Y REGISTRO
+========================================================= */
+
+--Inicio de sesion: regresa el id, el rol y el id de paciente o de empleado
+CREATE PROCEDURE sp_Login
+@username VARCHAR(50),
+@contrasena VARCHAR(50)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM USUARIO WHERE username = @username AND contrasena = @contrasena)
+BEGIN
+RAISERROR('Usuario o contraseña incorrectos.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM USUARIO WHERE username = @username AND activo = 0)
+BEGIN
+RAISERROR('La cuenta está desactivada.', 16, 1);
+RETURN;
+END
+SELECT u.id_usuario,
+u.username,
+u.rol,
+p.id_paciente,
+e.num_empleado
+FROM USUARIO u
+LEFT JOIN PACIENTE p ON p.id_usuario = u.id_usuario
+LEFT JOIN EMPLEADO e ON e.id_usuario = u.id_usuario
+WHERE u.username = @username;
+END
+GO
+
+--Registro de un paciente nuevo desde la web: crea su usuario y sus datos en una sola transaccion
+CREATE PROCEDURE sp_RegistrarPaciente
+@username VARCHAR(50),
+@contrasena VARCHAR(50),
+@nombre VARCHAR(60),
+@ap_paterno VARCHAR(60),
+@ap_materno VARCHAR(60),
+@curp CHAR(18),
+@fecha_nacimiento DATE,
+@sexo CHAR(1),
+@telefono CHAR(10),
+@correo VARCHAR(100)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF EXISTS (SELECT 1 FROM USUARIO WHERE username = @username)
+BEGIN
+RAISERROR('El nombre de usuario ya existe, elige otro.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM PACIENTE WHERE curp = @curp)
+BEGIN
+RAISERROR('Ya existe un paciente registrado con esa CURP.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM PACIENTE WHERE correo = @correo)
+BEGIN
+RAISERROR('Ya existe un paciente registrado con ese correo.', 16, 1);
+RETURN;
+END
+IF @fecha_nacimiento > CAST(GETDATE() AS DATE)
+BEGIN
+RAISERROR('La fecha de nacimiento no puede ser futura.', 16, 1);
+RETURN;
+END
+BEGIN TRY
+BEGIN TRANSACTION;
+INSERT INTO USUARIO (username, contrasena, rol)
+VALUES (@username, @contrasena, 'Paciente');
+DECLARE @id_usuario INT = SCOPE_IDENTITY();
+INSERT INTO PACIENTE (id_usuario, nombre, ap_paterno, ap_materno, curp, fecha_nacimiento, sexo, telefono, correo)
+VALUES (@id_usuario, @nombre, @ap_paterno, @ap_materno, @curp, @fecha_nacimiento, @sexo, @telefono, @correo);
+COMMIT TRANSACTION;
+SELECT SCOPE_IDENTITY() AS id_paciente;
+END TRY
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+DECLARE @msg VARCHAR(400) = ERROR_MESSAGE();
+RAISERROR(@msg, 16, 1);
+END CATCH
+END
+GO
+
+/* =========================================================
+PACIENTE
+========================================================= */
+
+--El paciente modifica sus datos personales (la CURP no se cambia)
+CREATE PROCEDURE sp_ActualizarPaciente
+@id_paciente INT,
+@nombre VARCHAR(60),
+@ap_paterno VARCHAR(60),
+@ap_materno VARCHAR(60),
+@telefono CHAR(10),
+@correo VARCHAR(100)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF EXISTS (SELECT 1 FROM PACIENTE WHERE correo = @correo AND id_paciente <> @id_paciente)
+BEGIN
+RAISERROR('Ese correo ya lo usa otro paciente.', 16, 1);
+RETURN;
+END
+UPDATE PACIENTE
+SET nombre = @nombre, ap_paterno = @ap_paterno, ap_materno = @ap_materno, telefono = @telefono, correo = @correo
+WHERE id_paciente = @id_paciente;
+END
+GO
+
+--Cancela las citas que no se pagaron dentro de las 8 horas (libera el horario)
+--La llaman sp_AgendarCita y sp_PagarCita antes de trabajar; Flask tambien puede llamarla al iniciar sesion
+CREATE PROCEDURE sp_CancelarFaltaPago
+AS
+BEGIN
+SET NOCOUNT ON;
+BEGIN TRANSACTION;
+--Primero se registra la cancelacion (el trigger de la bitacora la necesita)
+INSERT INTO CANCELACION (folio_cita, solicitada_por, motivo, estado, porcentaje_devolucion, monto_devuelto)
+SELECT folio_cita, 'Sistema', 'No se pagó en 8 horas', 'Aprobada', 0, 0
+FROM CITA
+WHERE estatus = 'Agendada pendiente de pago'
+AND GETDATE() > DATEADD(HOUR, 8, fecha_registro);
+--Despues se cambia el estatus de la cita
+UPDATE CITA
+SET estatus = 'Cancelada falta de pago'
+WHERE estatus = 'Agendada pendiente de pago'
+AND GETDATE() > DATEADD(HOUR, 8, fecha_registro);
+COMMIT TRANSACTION;
+END
+GO
+
+--Agendar cita: valida todas las reglas del PDF y regresa el comprobante
+CREATE PROCEDURE sp_AgendarCita
+@id_paciente INT,
+@num_doctor INT,
+@fecha DATE,
+@hora TIME
+AS
+BEGIN
+SET NOCOUNT ON;
+--Libera los horarios de citas que ya vencieron sin pago
+EXEC sp_CancelarFaltaPago;
+
+DECLARE @fecha_hora DATETIME = CAST(@fecha AS DATETIME) + CAST(@hora AS DATETIME);
+DECLARE @entrada TIME, @salida TIME, @id_consultorio INT, @costo DECIMAL(10,2);
+
+--El paciente debe existir
+IF NOT EXISTS (SELECT 1 FROM PACIENTE WHERE id_paciente = @id_paciente)
+BEGIN
+RAISERROR('El paciente no existe.', 16, 1);
+RETURN;
+END
+--El doctor debe existir y estar activo; de aqui se toman su jornada, consultorio y costo
+SELECT @entrada = d.hora_entrada, @salida = d.hora_salida, @id_consultorio = d.id_consultorio, @costo = es.costo_consulta
+FROM DOCTOR d
+JOIN EMPLEADO e ON e.num_empleado = d.num_empleado
+JOIN ESPECIALIDAD es ON es.id_especialidad = d.id_especialidad
+WHERE d.num_empleado = @num_doctor AND e.activo = 1;
+IF @costo IS NULL
+BEGIN
+RAISERROR('El doctor no existe o no está activo.', 16, 1);
+RETURN;
+END
+--Las citas son en bloques de 30 minutos
+IF DATEPART(MINUTE, @hora) NOT IN (0, 30)
+BEGIN
+RAISERROR('La hora debe ser en punto o y media (bloques de 30 minutos).', 16, 1);
+RETURN;
+END
+--No se puede agendar en el pasado
+IF @fecha_hora < GETDATE()
+BEGIN
+RAISERROR('La fecha de la cita ya pasó.', 16, 1);
+RETURN;
+END
+--Minimo 48 horas de anticipacion
+IF @fecha_hora < DATEADD(HOUR, 48, GETDATE())
+BEGIN
+RAISERROR('La cita debe agendarse con al menos 48 horas de anticipación.', 16, 1);
+RETURN;
+END
+--Maximo 3 meses de anticipacion
+IF @fecha > DATEADD(MONTH, 3, CAST(GETDATE() AS DATE))
+BEGIN
+RAISERROR('La cita no puede ser con más de 3 meses de anticipación.', 16, 1);
+RETURN;
+END
+--Debe estar dentro de la jornada del doctor (la cita dura 30 minutos)
+IF @hora < @entrada OR DATEADD(MINUTE, 30, @hora) > @salida
+BEGIN
+RAISERROR('La hora está fuera del horario de trabajo del doctor.', 16, 1);
+RETURN;
+END
+--El doctor no debe tener otra cita a esa hora
+IF EXISTS (SELECT 1 FROM CITA
+WHERE num_empleado_doctor = @num_doctor AND fecha_cita = @fecha AND hora_cita = @hora
+AND estatus IN ('Agendada pendiente de pago', 'Pagada pendiente por atender'))
+BEGIN
+RAISERROR('El doctor ya tiene una cita en ese horario.', 16, 1);
+RETURN;
+END
+--El paciente no debe tener otra cita a esa hora
+IF EXISTS (SELECT 1 FROM CITA
+WHERE id_paciente = @id_paciente AND fecha_cita = @fecha AND hora_cita = @hora
+AND estatus IN ('Agendada pendiente de pago', 'Pagada pendiente por atender'))
+BEGIN
+RAISERROR('Ya tienes otra cita en ese horario.', 16, 1);
+RETURN;
+END
+--El paciente no debe tener una cita pendiente con el mismo doctor
+IF EXISTS (SELECT 1 FROM CITA
+WHERE id_paciente = @id_paciente AND num_empleado_doctor = @num_doctor
+AND estatus IN ('Agendada pendiente de pago', 'Pagada pendiente por atender'))
+BEGIN
+RAISERROR('Ya tienes una cita pendiente con este doctor.', 16, 1);
+RETURN;
+END
+--Linea de pago unica: LP + fecha y hora actuales + id del paciente (20 caracteres)
+DECLARE @linea VARCHAR(20) = 'LP'
++ CONVERT(VARCHAR(8), GETDATE(), 112)
++ REPLACE(CONVERT(VARCHAR(8), GETDATE(), 108), ':', '')
++ RIGHT('0000' + CAST(@id_paciente AS VARCHAR(10)), 4);
+--Se guarda la cita (el trigger la registra en la bitacora)
+INSERT INTO CITA (id_paciente, num_empleado_doctor, id_consultorio, fecha_cita, hora_cita, costo, linea_pago)
+VALUES (@id_paciente, @num_doctor, @id_consultorio, @fecha, @hora, @costo, @linea);
+--Regresa el comprobante
+SELECT * FROM V_COMPROBANTE_CITA WHERE folio_cita = SCOPE_IDENTITY();
+END
+GO
+
+--Pagar cita: el trigger TR_PAGO_VALIDAR revisa estatus, monto y las 8 horas, y cambia la cita a Pagada
+CREATE PROCEDURE sp_PagarCita
+@folio_cita INT,
+@metodo_pago VARCHAR(15)
+AS
+BEGIN
+SET NOCOUNT ON;
+EXEC sp_CancelarFaltaPago;
+IF NOT EXISTS (SELECT 1 FROM CITA WHERE folio_cita = @folio_cita)
+BEGIN
+RAISERROR('La cita no existe.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM CITA WHERE folio_cita = @folio_cita AND estatus = 'Cancelada falta de pago')
+BEGIN
+RAISERROR('La cita se canceló porque no se pagó dentro de las 8 horas.', 16, 1);
+RETURN;
+END
+--El monto es el costo guardado en la cita
+INSERT INTO PAGO (folio_cita, monto, metodo_pago)
+SELECT folio_cita, costo, @metodo_pago
+FROM CITA
+WHERE folio_cita = @folio_cita;
+END
+GO
+
+--El paciente cancela su cita: aplica la politica 100% / 50% / 0%
+CREATE PROCEDURE sp_CancelarCitaPaciente
+@folio_cita INT,
+@id_paciente INT,
+@motivo VARCHAR(250)
+AS
+BEGIN
+SET NOCOUNT ON;
+DECLARE @estatus VARCHAR(30), @costo DECIMAL(10,2), @fecha_hora DATETIME;
+SELECT @estatus = estatus, @costo = costo, @fecha_hora = CAST(fecha_cita AS DATETIME) + CAST(hora_cita AS DATETIME)
+FROM CITA
+WHERE folio_cita = @folio_cita AND id_paciente = @id_paciente;
+IF @estatus IS NULL
+BEGIN
+RAISERROR('La cita no existe o no es tuya.', 16, 1);
+RETURN;
+END
+IF @estatus NOT IN ('Agendada pendiente de pago', 'Pagada pendiente por atender')
+BEGIN
+RAISERROR('Esta cita ya no se puede cancelar.', 16, 1);
+RETURN;
+END
+IF @fecha_hora <= GETDATE()
+BEGIN
+RAISERROR('La cita ya empezó o ya pasó, no se puede cancelar.', 16, 1);
+RETURN;
+END
+--Minutos que faltan para la cita: 48 h = 2880 min, 24 h = 1440 min
+DECLARE @minutos INT = DATEDIFF(MINUTE, GETDATE(), @fecha_hora);
+DECLARE @porcentaje INT;
+IF @estatus = 'Agendada pendiente de pago'
+SET @porcentaje = 0; --no hay pago que devolver
+ELSE IF @minutos >= 2880
+SET @porcentaje = 100;
+ELSE IF @minutos >= 1440
+SET @porcentaje = 50;
+ELSE
+SET @porcentaje = 0;
+DECLARE @monto DECIMAL(10,2) = @costo * @porcentaje / 100;
+BEGIN TRY
+BEGIN TRANSACTION;
+INSERT INTO CANCELACION (folio_cita, solicitada_por, motivo, estado, porcentaje_devolucion, monto_devuelto)
+VALUES (@folio_cita, 'Paciente', @motivo, 'Aprobada', @porcentaje, @monto);
+UPDATE CITA SET estatus = 'Cancelada paciente' WHERE folio_cita = @folio_cita;
+COMMIT TRANSACTION;
+SELECT @porcentaje AS porcentaje_devolucion, @monto AS monto_devuelto;
+END TRY
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+DECLARE @msg VARCHAR(400) = ERROR_MESSAGE();
+RAISERROR(@msg, 16, 1);
+END CATCH
+END
+GO
+
+/* =========================================================
+DOCTOR
+========================================================= */
+
+--El doctor solo puede cambiar su telefono y correo (los datos sensibles los cambia recepcion)
+CREATE PROCEDURE sp_ActualizarContactoEmpleado
+@num_empleado INT,
+@telefono CHAR(10),
+@correo VARCHAR(100)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF EXISTS (SELECT 1 FROM EMPLEADO WHERE correo = @correo AND num_empleado <> @num_empleado)
+BEGIN
+RAISERROR('Ese correo ya lo usa otro empleado.', 16, 1);
+RETURN;
+END
+UPDATE EMPLEADO SET telefono = @telefono, correo = @correo WHERE num_empleado = @num_empleado;
+END
+GO
+
+--El doctor solicita cancelar una cita; queda Pendiente hasta que recepcion la apruebe
+CREATE PROCEDURE sp_SolicitarCancelacionDoctor
+@folio_cita INT,
+@num_doctor INT,
+@motivo VARCHAR(250)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM CITA
+WHERE folio_cita = @folio_cita AND num_empleado_doctor = @num_doctor
+AND estatus IN ('Agendada pendiente de pago', 'Pagada pendiente por atender')
+AND CAST(fecha_cita AS DATETIME) + CAST(hora_cita AS DATETIME) > GETDATE())
+BEGIN
+RAISERROR('La cita no existe, no es tuya, ya pasó o ya no se puede cancelar.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM CANCELACION WHERE folio_cita = @folio_cita AND estado = 'Pendiente')
+BEGIN
+RAISERROR('Ya hay una solicitud de cancelación pendiente para esta cita.', 16, 1);
+RETURN;
+END
+INSERT INTO CANCELACION (folio_cita, solicitada_por, motivo, estado)
+VALUES (@folio_cita, 'Doctor', @motivo, 'Pendiente');
+END
+GO
+
+--Crear receta: el trigger TR_RECETA_ATENDER valida que la cita este pagada y la marca como Atendida
+--Despues se agregan los medicamentos uno por uno con sp_AgregarMedicamentoReceta
+CREATE PROCEDURE sp_CrearReceta
+@folio_cita INT,
+@num_doctor INT,
+@diagnostico VARCHAR(500),
+@tratamiento VARCHAR(500),
+@observaciones VARCHAR(500)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM CITA WHERE folio_cita = @folio_cita AND num_empleado_doctor = @num_doctor)
+BEGIN
+RAISERROR('La cita no existe o no es de este doctor.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM RECETA WHERE folio_cita = @folio_cita)
+BEGIN
+RAISERROR('Esta cita ya tiene receta.', 16, 1);
+RETURN;
+END
+INSERT INTO RECETA (folio_cita, diagnostico, tratamiento, observaciones)
+VALUES (@folio_cita, @diagnostico, @tratamiento, @observaciones);
+SELECT SCOPE_IDENTITY() AS folio_receta;
+END
+GO
+
+--Agrega un medicamento a la receta
+CREATE PROCEDURE sp_AgregarMedicamentoReceta
+@folio_receta INT,
+@num_doctor INT,
+@id_medicamento INT,
+@dosis VARCHAR(100)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM RECETA r JOIN CITA c ON c.folio_cita = r.folio_cita
+WHERE r.folio_receta = @folio_receta AND c.num_empleado_doctor = @num_doctor)
+BEGIN
+RAISERROR('La receta no existe o no es de este doctor.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM RECETA_MEDICAMENTO WHERE folio_receta = @folio_receta AND id_medicamento = @id_medicamento)
+BEGIN
+RAISERROR('Ese medicamento ya está en la receta.', 16, 1);
+RETURN;
+END
+INSERT INTO RECETA_MEDICAMENTO (folio_receta, id_medicamento, dosis)
+VALUES (@folio_receta, @id_medicamento, @dosis);
+END
+GO
+
+--Crea o actualiza el historial medico (solo un doctor que haya tenido cita con el paciente)
+CREATE PROCEDURE sp_GuardarHistorial
+@id_paciente INT,
+@num_doctor INT,
+@tipo_sangre VARCHAR(3),
+@alergias VARCHAR(500),
+@padecimientos_previos VARCHAR(500),
+@peso DECIMAL(5,2),
+@estatura DECIMAL(3,2)
+AS
+BEGIN
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM CITA WHERE id_paciente = @id_paciente AND num_empleado_doctor = @num_doctor)
+BEGIN
+RAISERROR('Solo un doctor que haya tenido cita con el paciente puede modificar su historial.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM HISTORIAL_MEDICO WHERE id_paciente = @id_paciente)
+UPDATE HISTORIAL_MEDICO
+SET tipo_sangre = @tipo_sangre, alergias = @alergias, padecimientos_previos = @padecimientos_previos, peso = @peso, estatura = @estatura
+WHERE id_paciente = @id_paciente;
+ELSE
+INSERT INTO HISTORIAL_MEDICO (id_paciente, tipo_sangre, alergias, padecimientos_previos, peso, estatura)
+VALUES (@id_paciente, @tipo_sangre, @alergias, @padecimientos_previos, @peso, @estatura);
+END
+GO
+
+/* =========================================================
+RECEPCIONISTA
+========================================================= */
+
+--Alta de recepcionista, farmaceutico o doctor junto con su usuario
+--Solo la puede hacer un usuario Recepcionista o Admin
+--Para Recepcionista y Farmaceutico los datos de doctor se mandan en NULL
+CREATE PROCEDURE sp_AltaEmpleado
+@alta_por INT,
+@rol VARCHAR(15),
+@username VARCHAR(50),
+@contrasena VARCHAR(50),
+@nombre VARCHAR(60),
+@ap_paterno VARCHAR(60),
+@ap_materno VARCHAR(60),
+@curp CHAR(18),
+@telefono CHAR(10),
+@correo VARCHAR(100),
+@cedula VARCHAR(8) = NULL,
+@id_especialidad INT = NULL,
+@id_consultorio INT = NULL,
+@hora_entrada TIME = NULL,
+@hora_salida TIME = NULL
+AS
+BEGIN
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM USUARIO WHERE id_usuario = @alta_por AND rol IN ('Recepcionista', 'Admin') AND activo = 1)
+BEGIN
+RAISERROR('Solo una recepcionista o el administrador pueden dar de alta empleados.', 16, 1);
+RETURN;
+END
+IF @rol NOT IN ('Recepcionista', 'Farmaceutico', 'Doctor')
+BEGIN
+RAISERROR('El rol debe ser Recepcionista, Farmaceutico o Doctor.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM USUARIO WHERE username = @username)
+BEGIN
+RAISERROR('El nombre de usuario ya existe.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM EMPLEADO WHERE curp = @curp)
+BEGIN
+RAISERROR('Ya existe un empleado con esa CURP.', 16, 1);
+RETURN;
+END
+IF @rol = 'Doctor'
+BEGIN
+IF @cedula IS NULL OR @id_especialidad IS NULL OR @id_consultorio IS NULL OR @hora_entrada IS NULL OR @hora_salida IS NULL
+BEGIN
+RAISERROR('Para un doctor se necesitan cédula, especialidad, consultorio y horario.', 16, 1);
+RETURN;
+END
+IF EXISTS (SELECT 1 FROM DOCTOR WHERE cedula_profesional = @cedula)
+BEGIN
+RAISERROR('Ya existe un doctor con esa cédula profesional.', 16, 1);
+RETURN;
+END
+--El consultorio no puede estar ocupado por otro doctor activo en un horario que se empalme
+IF EXISTS (SELECT 1 FROM DOCTOR d JOIN EMPLEADO e ON e.num_empleado = d.num_empleado
+WHERE d.id_consultorio = @id_consultorio AND e.activo = 1
+AND d.hora_entrada < @hora_salida AND @hora_entrada < d.hora_salida)
+BEGIN
+RAISERROR('El consultorio ya está ocupado en ese horario por otro doctor.', 16, 1);
+RETURN;
+END
+END
+BEGIN TRY
+BEGIN TRANSACTION;
+INSERT INTO USUARIO (username, contrasena, rol) VALUES (@username, @contrasena, @rol);
+DECLARE @id_usuario INT = SCOPE_IDENTITY();
+INSERT INTO EMPLEADO (id_usuario, nombre, ap_paterno, ap_materno, curp, telefono, correo)
+VALUES (@id_usuario, @nombre, @ap_paterno, @ap_materno, @curp, @telefono, @correo);
+DECLARE @num_empleado INT = SCOPE_IDENTITY();
+IF @rol = 'Doctor'
+INSERT INTO DOCTOR (num_empleado, cedula_profesional, id_especialidad, id_consultorio, hora_entrada, hora_salida)
+VALUES (@num_empleado, @cedula, @id_especialidad, @id_consultorio, @hora_entrada, @hora_salida);
+COMMIT TRANSACTION;
+SELECT @num_empleado AS num_empleado;
+END TRY
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+DECLARE @msg VARCHAR(400) = ERROR_MESSAGE();
+RAISERROR(@msg, 16, 1);
+END CATCH
+END
+GO
+
+--La recepcionista modifica los datos sensibles de un doctor
+--La especialidad solo se puede cambiar si el doctor no tiene citas pendientes
+CREATE PROCEDURE sp_ActualizarDoctor
+@num_doctor INT,
+@nombre VARCHAR(60),
+@ap_paterno VARCHAR(60),
+@ap_materno VARCHAR(60),
+@curp CHAR(18),
+@cedula VARCHAR(8),
+@id_especialidad INT
+AS
+BEGIN
+SET NOCOUNT ON;
+IF EXISTS (SELECT 1 FROM DOCTOR WHERE num_empleado = @num_doctor AND id_especialidad <> @id_especialidad)
+AND EXISTS (SELECT 1 FROM CITA WHERE num_empleado_doctor = @num_doctor
+AND estatus IN ('Agendada pendiente de pago', 'Pagada pendiente por atender'))
+BEGIN
+RAISERROR('No se puede cambiar la especialidad: el doctor tiene citas pendientes.', 16, 1);
+RETURN;
+END
+BEGIN TRY
+BEGIN TRANSACTION;
+UPDATE EMPLEADO SET nombre = @nombre, ap_paterno = @ap_paterno, ap_materno = @ap_materno, curp = @curp
+WHERE num_empleado = @num_doctor;
+UPDATE DOCTOR SET cedula_profesional = @cedula, id_especialidad = @id_especialidad
+WHERE num_empleado = @num_doctor;
+COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+DECLARE @msg VARCHAR(400) = ERROR_MESSAGE();
+RAISERROR(@msg, 16, 1);
+END CATCH
+END
+GO
+
+--Baja logica de un empleado (no se borra); un doctor con citas pendientes no se puede dar de baja
+CREATE PROCEDURE sp_BajaEmpleado
+@num_empleado INT
+AS
+BEGIN
+SET NOCOUNT ON;
+IF EXISTS (SELECT 1 FROM CITA WHERE num_empleado_doctor = @num_empleado
+AND estatus IN ('Agendada pendiente de pago', 'Pagada pendiente por atender'))
+BEGIN
+RAISERROR('El doctor tiene citas pendientes; cancélalas o reasígnalas antes de darlo de baja.', 16, 1);
+RETURN;
+END
+UPDATE EMPLEADO SET activo = 0 WHERE num_empleado = @num_empleado;
+UPDATE USUARIO SET activo = 0 WHERE id_usuario = (SELECT id_usuario FROM EMPLEADO WHERE num_empleado = @num_empleado);
+END
+GO
+
+--La recepcionista aprueba o rechaza la solicitud de cancelacion de un doctor
+--Si la aprueba y la cita estaba pagada, se devuelve el 100%
+CREATE PROCEDURE sp_ResolverCancelacion
+@id_cancelacion INT,
+@num_recepcionista INT,
+@aprobar BIT
+AS
+BEGIN
+SET NOCOUNT ON;
+DECLARE @folio INT, @estatus VARCHAR(30), @costo DECIMAL(10,2);
+IF NOT EXISTS (SELECT 1 FROM EMPLEADO e JOIN USUARIO u ON u.id_usuario = e.id_usuario
+WHERE e.num_empleado = @num_recepcionista AND u.rol = 'Recepcionista')
+BEGIN
+RAISERROR('Solo una recepcionista puede resolver solicitudes de cancelación.', 16, 1);
+RETURN;
+END
+SELECT @folio = ca.folio_cita, @estatus = c.estatus, @costo = c.costo
+FROM CANCELACION ca
+JOIN CITA c ON c.folio_cita = ca.folio_cita
+WHERE ca.id_cancelacion = @id_cancelacion AND ca.solicitada_por = 'Doctor' AND ca.estado = 'Pendiente';
+IF @folio IS NULL
+BEGIN
+RAISERROR('La solicitud no existe o ya fue resuelta.', 16, 1);
+RETURN;
+END
+--Rechazar: solo cambia el estado de la solicitud, la cita sigue igual
+IF @aprobar = 0
+BEGIN
+UPDATE CANCELACION SET estado = 'Rechazada', aprobada_por = @num_recepcionista
+WHERE id_cancelacion = @id_cancelacion;
+RETURN;
+END
+IF @estatus NOT IN ('Agendada pendiente de pago', 'Pagada pendiente por atender')
+BEGIN
+RAISERROR('La cita ya no se puede cancelar.', 16, 1);
+RETURN;
+END
+DECLARE @porcentaje INT = CASE WHEN @estatus = 'Pagada pendiente por atender' THEN 100 ELSE 0 END;
+BEGIN TRY
+BEGIN TRANSACTION;
+UPDATE CANCELACION
+SET estado = 'Aprobada', aprobada_por = @num_recepcionista, porcentaje_devolucion = @porcentaje, monto_devuelto = @costo * @porcentaje / 100
+WHERE id_cancelacion = @id_cancelacion;
+UPDATE CITA SET estatus = 'Cancelada doctor' WHERE folio_cita = @folio;
+COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+DECLARE @msg VARCHAR(400) = ERROR_MESSAGE();
+RAISERROR(@msg, 16, 1);
+END CATCH
+END
+GO
+
+--Marca una cita pagada como No acudio (solo despues de la hora de la cita)
+CREATE PROCEDURE sp_MarcarNoAcudio
+@folio_cita INT
+AS
+BEGIN
+SET NOCOUNT ON;
+IF NOT EXISTS (SELECT 1 FROM CITA
+WHERE folio_cita = @folio_cita AND estatus = 'Pagada pendiente por atender'
+AND CAST(fecha_cita AS DATETIME) + CAST(hora_cita AS DATETIME) < GETDATE())
+BEGIN
+RAISERROR('Solo se puede marcar No acudió en una cita pagada cuya hora ya pasó.', 16, 1);
+RETURN;
+END
+UPDATE CITA SET estatus = 'No acudio' WHERE folio_cita = @folio_cita;
+END
+GO
+
+/* =========================================================
+FARMACIA Y COBRO
+========================================================= */
+
+--Crea el ticket; despues se agregan los renglones
+CREATE PROCEDURE sp_CrearVenta
+@num_empleado INT,
+@id_paciente INT = NULL,
+@nombre_cliente VARCHAR(120) = NULL,
+@metodo_pago VARCHAR(15)
+AS
+BEGIN
+SET NOCOUNT ON;
+INSERT INTO VENTA (num_empleado, id_paciente, nombre_cliente, metodo_pago)
+VALUES (@num_empleado, @id_paciente, @nombre_cliente, @metodo_pago);
+SELECT SCOPE_IDENTITY() AS id_venta;
+END
+GO
+
+--Agrega un medicamento al ticket con su precio actual (el trigger valida y descuenta el stock)
+CREATE PROCEDURE sp_AgregarMedicamentoVenta
+@id_venta INT,
+@id_medicamento INT,
+@cantidad INT
+AS
+BEGIN
+SET NOCOUNT ON;
+INSERT INTO DETALLE_VENTA (id_venta, id_medicamento, cantidad, precio_unitario)
+SELECT @id_venta, id_medicamento, @cantidad, precio
+FROM MEDICAMENTO
+WHERE id_medicamento = @id_medicamento;
+IF @@ROWCOUNT = 0
+RAISERROR('El medicamento no existe.', 16, 1);
+END
+GO
+
+--Agrega un servicio al ticket con su precio actual
+CREATE PROCEDURE sp_AgregarServicioVenta
+@id_venta INT,
+@id_servicio INT,
+@cantidad INT
+AS
+BEGIN
+SET NOCOUNT ON;
+INSERT INTO DETALLE_VENTA (id_venta, id_servicio, cantidad, precio_unitario)
+SELECT @id_venta, id_servicio, @cantidad, precio
+FROM SERVICIO
+WHERE id_servicio = @id_servicio;
+IF @@ROWCOUNT = 0
+RAISERROR('El servicio no existe.', 16, 1);
+END
+GO
+
+/* =========================================================
+PRUEBAS (ejecutalas una por una)
+========================================================= */
+
+--Login correcto e incorrecto
+--EXEC sp_Login 'maria.lopez', 'Paciente2026!';
+--EXEC sp_Login 'maria.lopez', 'mal';
+
+--Registrar un paciente nuevo
+--EXEC sp_RegistrarPaciente 'pedro.ruiz', 'Pedro2026!', 'Pedro', 'Ruiz', 'Gil', 'RUGP000101HDFZLD01', '2000-01-01', 'M', '5512345678', 'pedro.ruiz@gmail.com';
+
+--Agendar: paciente 3 con el doctor 3 (Cardiologia, 07:00-14:00) dentro de 5 dias a las 09:00
+--DECLARE @f DATE = DATEADD(DAY, 5, CAST(GETDATE() AS DATE));
+--EXEC sp_AgendarCita 3, 3, @f, '09:00';
+
+--Agendar mañana: debe marcar error de 48 horas
+--DECLARE @m DATE = DATEADD(DAY, 1, CAST(GETDATE() AS DATE));
+--EXEC sp_AgendarCita 3, 4, @m, '15:00';
+
+--Agendar fuera del horario del doctor 3 (sale a las 14:00): debe marcar error
+--DECLARE @g DATE = DATEADD(DAY, 6, CAST(GETDATE() AS DATE));
+--EXEC sp_AgendarCita 4, 3, @g, '18:00';
+
+--Pagar la cita que se acaba de agendar
+--DECLARE @folio INT = (SELECT MAX(folio_cita) FROM CITA);
+--EXEC sp_PagarCita @folio, 'Tarjeta';
+
+--Cancelarla como paciente (faltan mas de 48 h: devuelve 100%)
+--DECLARE @folio2 INT = (SELECT MAX(folio_cita) FROM CITA);
+--EXEC sp_CancelarCitaPaciente @folio2, 3, 'Ya no puedo asistir';
+
+--Solicitud del doctor 40 (Pediatría) sobre su cita 13 y aprobacion de la recepcionista (empleado 1)
+--EXEC sp_SolicitarCancelacionDoctor 13, 40, 'Congreso';
+--SELECT * FROM V_SOLICITUDES_CANCELACION WHERE estado = 'Pendiente';
+--EXEC sp_ResolverCancelacion <id_cancelacion>, 1, 1;
+
+--Venta de 2 Paracetamol y una inyeccion
+--EXEC sp_CrearVenta 2, NULL, 'Cliente mostrador', 'Efectivo';
+--EXEC sp_AgregarMedicamentoVenta <id_venta>, 1, 2;
+--EXEC sp_AgregarServicioVenta <id_venta>, 1, 1;
+--SELECT * FROM V_TICKET_TOTAL WHERE id_venta = <id_venta>;
