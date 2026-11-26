@@ -314,7 +314,7 @@ INSERT INTO SERVICIO (nombre, precio) VALUES
 ('Estudio de sangre', 350);
 GO
 
---Usuario administrador inicial (cambiar la contraseña)
+--Usuario administrador inicial
 INSERT INTO USUARIO (username, contrasena, rol) VALUES
 ('admin', 'Admin2026!', 'Admin');
 GO
