@@ -6,9 +6,7 @@
 USE HospitalDB;
 GO
 
-/* =========================================================
-PACIENTE
-========================================================= */
+--PACIENTE
 
 --Datos personales del paciente con su edad y su usuario
 CREATE VIEW V_DATOS_PACIENTE AS
@@ -104,9 +102,7 @@ FROM CITA
 WHERE estatus IN ('Agendada pendiente de pago', 'Pagada pendiente por atender');
 GO
 
-/* =========================================================
-DOCTOR
-========================================================= */
+--DOCTOR
 
 --Datos del doctor con su especialidad, consultorio y jornada
 CREATE VIEW V_DATOS_DOCTOR AS
@@ -195,9 +191,8 @@ FROM HISTORIAL_MEDICO h
 JOIN PACIENTE p ON p.id_paciente = h.id_paciente;
 GO
 
-/* =========================================================
-RECEPCIONISTA
-========================================================= */
+
+--RECEPCIONISTA
 
 --Todos los empleados con su rol
 CREATE VIEW V_EMPLEADOS AS
@@ -271,9 +266,23 @@ LEFT JOIN EMPLEADO e ON e.num_empleado = d.num_empleado AND e.activo = 1
 GROUP BY es.id_especialidad, es.nombre, es.costo_consulta;
 GO
 
-/* =========================================================
-FARMACIA Y COBRO
-========================================================= */
+--Consultorios (para asignar uno al dar de alta un doctor)
+CREATE VIEW V_CONSULTORIOS AS
+SELECT id_consultorio,
+numero,
+piso
+FROM CONSULTORIO;
+GO
+
+--FARMACIA Y COBRO
+
+--Servicios extras con su precio (para cobrarlos)
+CREATE VIEW V_SERVICIOS AS
+SELECT id_servicio,
+nombre,
+precio
+FROM SERVICIO;
+GO
 
 --Inventario de medicamentos con aviso de stock
 CREATE VIEW V_INVENTARIO AS
@@ -320,17 +329,4 @@ JOIN EMPLEADO e ON e.num_empleado = v.num_empleado
 LEFT JOIN PACIENTE p ON p.id_paciente = v.id_paciente
 JOIN DETALLE_VENTA dv ON dv.id_venta = v.id_venta
 GROUP BY v.id_venta, v.fecha, e.nombre, e.ap_paterno, v.id_paciente, p.nombre, p.ap_paterno, v.nombre_cliente, v.metodo_pago;
-GO
-
-/* =========================================================
-PRUEBAS RAPIDAS
-========================================================= */
-SELECT * FROM V_CITAS_PACIENTE WHERE id_paciente = 1 ORDER BY fecha_cita DESC;
-SELECT * FROM V_COMPROBANTE_CITA WHERE folio_cita = 15;
-SELECT * FROM V_CITAS_DOCTOR WHERE num_empleado_doctor = 3;
-SELECT * FROM V_RECETA WHERE folio_receta = 1;
-SELECT * FROM V_RECETA_MEDICAMENTOS WHERE folio_receta = 1;
-SELECT * FROM V_SOLICITUDES_CANCELACION;
-SELECT * FROM V_ESPECIALIDADES;
-SELECT * FROM V_TICKET_TOTAL;
 GO
