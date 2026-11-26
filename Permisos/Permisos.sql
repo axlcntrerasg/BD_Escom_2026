@@ -1,19 +1,8 @@
 --Proyecto final Bases de Datos: SGBD Hospital
 --Script 06: seguridad y permisos
---Ejecutar despues del script 05 (procedimientos)
---Requisito: SQL Server debe aceptar autenticacion de SQL Server
---(clic derecho en el servidor > Properties > Security > "SQL Server and Windows Authentication mode"
---y reiniciar el servicio)
 
---Idea general:
---Cada perfil tiene un login, un usuario y un rol en la base de datos.
---Los roles NO tienen permisos sobre las tablas: solo pueden ejecutar sus procedimientos
---y consultar sus vistas. SQL Server deja que el SP o la vista lean las tablas por dentro
---(encadenamiento de propiedad), pero nadie puede tocar las tablas directamente.
+--1. LOGINS (nivel servidor)
 
-/* =========================================================
-1. LOGINS (nivel servidor)
-========================================================= */
 USE master;
 GO
 CREATE LOGIN login_app WITH PASSWORD = 'App#Hospital2026', DEFAULT_DATABASE = HospitalDB;
@@ -24,9 +13,9 @@ CREATE LOGIN login_farmaceutico WITH PASSWORD = 'Farma#Hospital2026', DEFAULT_DA
 CREATE LOGIN login_admin WITH PASSWORD = 'Admin#Hospital2026', DEFAULT_DATABASE = HospitalDB;
 GO
 
-/* =========================================================
-2. USUARIOS Y ROLES (nivel base de datos)
-========================================================= */
+
+--2. USUARIOS Y ROLES (nivel base de datos)
+
 USE HospitalDB;
 GO
 --Un usuario de base de datos por cada login
@@ -56,9 +45,7 @@ ALTER ROLE rol_farmaceutico ADD MEMBER usr_farmaceutico;
 ALTER ROLE db_owner ADD MEMBER usr_admin;
 GO
 
-/* =========================================================
-3. PERMISOS POR PERFIL
-========================================================= */
+--3. PERMISOS POR PERFIL
 
 --PUBLICO: la conexion de Flask antes de iniciar sesion (solo login y registro)
 GRANT EXECUTE ON sp_Login TO rol_publico;
@@ -106,6 +93,8 @@ GRANT SELECT ON V_DOCTORES_POR_ESPECIALIDAD TO rol_recepcionista;
 GRANT SELECT ON V_HORARIOS_OCUPADOS TO rol_recepcionista;
 GRANT SELECT ON V_TICKET_DETALLE TO rol_recepcionista;
 GRANT SELECT ON V_TICKET_TOTAL TO rol_recepcionista;
+GRANT SELECT ON V_CONSULTORIOS TO rol_recepcionista;
+GRANT SELECT ON V_SERVICIOS TO rol_recepcionista;
 GRANT EXECUTE ON sp_AltaEmpleado TO rol_recepcionista;
 GRANT EXECUTE ON sp_ActualizarDoctor TO rol_recepcionista;
 GRANT EXECUTE ON sp_BajaEmpleado TO rol_recepcionista;
@@ -133,36 +122,16 @@ GRANT SELECT ON V_INVENTARIO TO rol_farmaceutico;
 GRANT SELECT ON V_RECETA_MEDICAMENTOS TO rol_farmaceutico;
 GRANT SELECT ON V_TICKET_DETALLE TO rol_farmaceutico;
 GRANT SELECT ON V_TICKET_TOTAL TO rol_farmaceutico;
+GRANT SELECT ON V_SERVICIOS TO rol_farmaceutico;
 GRANT EXECUTE ON sp_CrearVenta TO rol_farmaceutico;
 GRANT EXECUTE ON sp_AgregarMedicamentoVenta TO rol_farmaceutico;
 GRANT EXECUTE ON sp_AgregarServicioVenta TO rol_farmaceutico;
 GO
 
-/* =========================================================
-4. BITACORAS: solo consulta e insercion para todos
-========================================================= */
+
+--4. BITACORAS: solo consulta e insercion para todos
+
 --"public" es el rol al que pertenecen todos los usuarios de la base
 DENY UPDATE, DELETE ON BITACORA_ESTATUS_CITA TO public;
 DENY UPDATE, DELETE ON BITACORA_HISTORIAL_CITA TO public;
-GO
-
-/* =========================================================
-5. COMPROBAR LOS PERMISOS
-========================================================= */
---Lista de permisos de cada rol
-SELECT pr.name AS rol,
-pe.state_desc AS permiso,
-pe.permission_name AS accion,
-OBJECT_NAME(pe.major_id) AS objeto
-FROM sys.database_permissions pe
-JOIN sys.database_principals pr ON pr.principal_id = pe.grantee_principal_id
-WHERE pr.name LIKE 'rol_%' OR pr.name = 'public' AND OBJECT_NAME(pe.major_id) LIKE 'BITACORA%'
-ORDER BY pr.name, objeto;
-GO
-
---Probar como recepcionista: la primera consulta funciona, la segunda debe marcar error de permisos
-EXECUTE AS USER = 'usr_recepcionista';
-SELECT TOP 5 * FROM V_CITAS_RECEPCION;
-SELECT TOP 5 * FROM V_RECETA;
-REVERT;
 GO
