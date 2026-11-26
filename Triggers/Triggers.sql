@@ -1,15 +1,10 @@
 --Proyecto final Bases de Datos: SGBD Hospital
 --Script 04: triggers
---Ejecutar despues del script 02 (datos de prueba): los datos de prueba
---insertan citas ya atendidas o canceladas que estos triggers no dejarian registrar
---En los triggers, "inserted" tiene las filas nuevas y "deleted" las filas como estaban antes
 
 USE HospitalDB;
 GO
 
-/* =========================================================
-CITA
-========================================================= */
+--CITA
 
 --Una cita en estatus final (cancelada, atendida o no acudio) ya no puede cambiar de estatus
 CREATE TRIGGER TR_CITA_ESTATUS_FINAL
@@ -97,9 +92,8 @@ AND d.estatus <> i.estatus;
 END
 GO
 
-/* =========================================================
-PAGO
-========================================================= */
+--PAGO
+
 
 --Al registrar un pago: valida que la cita este pendiente de pago, que el monto sea el costo
 --y que no hayan pasado las 8 horas; si todo esta bien, la cita pasa a Pagada
@@ -149,9 +143,8 @@ WHERE folio_cita IN (SELECT folio_cita FROM inserted);
 END
 GO
 
-/* =========================================================
-RECETA
-========================================================= */
+
+--RECETA
 
 --Al crear una receta: la cita debe estar pagada y el dia de la cita ya debe haber llegado;
 --si todo esta bien, la cita pasa a Atendida (esto dispara las dos bitacoras)
@@ -187,9 +180,7 @@ WHERE folio_cita IN (SELECT folio_cita FROM inserted);
 END
 GO
 
-/* =========================================================
-FARMACIA
-========================================================= */
+--FARMACIA
 
 --Al vender medicamentos: valida que haya stock suficiente y lo descuenta
 CREATE TRIGGER TR_DETALLE_VENTA_STOCK
@@ -224,9 +215,7 @@ GROUP BY id_medicamento) v ON v.id_medicamento = m.id_medicamento;
 END
 GO
 
-/* =========================================================
-BITACORAS: solo consulta e insercion
-========================================================= */
+--BITACORAS: solo consulta e insercion
 
 --Impide modificar o borrar la bitacora de estatus
 CREATE TRIGGER TR_BITACORA_ESTATUS_PROTEGER
@@ -247,32 +236,3 @@ BEGIN
 RAISERROR('La bitácora del historial solo permite consulta e inserción.', 16, 1);
 END
 GO
-
-/* =========================================================
-PRUEBAS (ejecutalas una por una y revisa el resultado)
-========================================================= */
-
---1. Crear una cita y pagarla: debe pasar a Pagada y aparecer dos veces en la bitacora
---(paciente 3 con el doctor 3 de Cardiología, costo 900, dentro de 10 dias a las 08:00)
---INSERT INTO CITA (id_paciente, num_empleado_doctor, id_consultorio, fecha_cita, hora_cita, costo, linea_pago)
---VALUES (3, 3, 1, DATEADD(DAY, 10, CAST(GETDATE() AS DATE)), '08:00', 900, 'LPPRUEBA0000000001');
---INSERT INTO PAGO (folio_cita, monto, metodo_pago) VALUES ((SELECT MAX(folio_cita) FROM CITA), 900, 'Tarjeta');
---SELECT folio_cita, estatus FROM CITA WHERE linea_pago = 'LPPRUEBA0000000001';
---SELECT * FROM BITACORA_ESTATUS_CITA WHERE folio_cita = (SELECT MAX(folio_cita) FROM CITA);
-
---2. Pagar con un monto incorrecto: debe marcar error
---INSERT INTO PAGO (folio_cita, monto, metodo_pago) VALUES (16, 100, 'Efectivo');
-
---3. Cambiar el estatus de una cita atendida: debe marcar error
---UPDATE CITA SET estatus = 'Cancelada paciente' WHERE folio_cita = 1;
-
---4. Vender mas medicamento del que hay (Tamoxifeno, id 15, stock 30): debe marcar error
---INSERT INTO VENTA (num_empleado, nombre_cliente, metodo_pago) VALUES (2, 'Cliente prueba', 'Efectivo');
---INSERT INTO DETALLE_VENTA (id_venta, id_medicamento, cantidad, precio_unitario) VALUES (11, 15, 100, 450);
-
---5. Vender 2 Paracetamol (id 1): el stock debe bajar en 2
---INSERT INTO DETALLE_VENTA (id_venta, id_medicamento, cantidad, precio_unitario) VALUES (11, 1, 2, 45);
---SELECT nombre, stock FROM MEDICAMENTO WHERE id_medicamento = 1;
-
---6. Borrar la bitacora: debe marcar error
---DELETE FROM BITACORA_ESTATUS_CITA;
